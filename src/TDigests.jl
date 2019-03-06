@@ -150,7 +150,7 @@ function mergedata!(td::TDigest, newdata)
         if forward
             mergebuffer!(td, Val(MergeForward))
         else
-            mergebuffer!(td, Val(MergeBackwards))
+            mergebuffer!(td, Val(MergeReverse))
         end
         forward = !forward
     end
@@ -173,7 +173,7 @@ function insertbuffer!(td::TDigest, n, newdata, state)
     iteration = iterate(newdata, state...)
     # Recursive insertion of iterations into the buffer (function barrier)
     # return the last position inserted, and the state after last successful iteration
-    n, state = _bufferiteration!(td, n, iteration, state)
+    n, state = _bufferiteration!(td, n, iteration, newdata, state)
     td._limits[3] = n
     finished = (n < length(td.buffer))
     return (state, finished)
@@ -181,18 +181,18 @@ end
 
 # methods of _bufferiteration (single insertion of data included in `iteration`)
 
-function _bufferiteration!(td, n, iteration, _) # for successful iterations
+function _bufferiteration!(td, n, iteration, newdata, _) # for successful iterations
     value, state = iteration
     td.buffer[n] = Cluster(value)
     if n < length(td.buffer) # condition for recursion
         iteration = iterate(newdata, state)
-        n, state = _bufferiteration!(td, iteration, n+1, state)
+        n, state = _bufferiteration!(td, n+1, iteration, newdata, state)
     end
     return (n, state)
 end
 
 # for failed iteration (the iteration reached its end)
-function _bufferiteration!(td, iteration::Nothing, n, previous_state)
+function _bufferiteration!(td, n, iteration::Nothing, newdata, previous_state)
     return (n-1, previous_state)
 end
     
