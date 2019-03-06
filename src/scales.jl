@@ -45,6 +45,12 @@ defined between ±(δ/4) for `q` between [0,1] (see equation 3 in [1]).
     k1_inv(k, δ)
 
 Inverse scale functions, such that `k0_inv(k0(q, δ), δ) == q`, etc.
+
+## References:
+
+[1] Dunning, T. & Ertl, O. "Computing extremely accurate quantiles using t-digests",
+arXiv: 1902.04023v1, 2019.
+
 """
 k0(q, δ) = 0.5*(δ*q)
 k1(q, δ) = δ/(2π)*approx_asin(2q - 1)
