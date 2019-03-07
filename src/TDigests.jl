@@ -76,9 +76,14 @@ struct TDigest{F<:Function, FI<:Function}
     # actual clusters: .clusters[_limits[1]:_limits[2]]
     # actual buffer: .buffer[1:_limits[3]]
     _limits::Vector{Int}
+    # extrema for more accurate estimation of extreme quantiles
+    _extrema::Vector{Float64}
     # Inner constructors sets empty centroid and buffer vectors
     function TDigest(δ::Int, k::Function=k1, kinv::Function=k1_inv, buffersize::Int=10δ)
-        new{typeof(k),typeof(kinv)}(zeros(Cluster, δ), zeros(Cluster, δ+buffersize), δ, k, kinv, [1, 0, 0])
+        new{typeof(k),typeof(kinv)}(zeros(Cluster, δ),
+                                    zeros(Cluster, δ+buffersize),
+                                    δ, k, kinv,
+                                    [1, 0, 0], zeros(Float64,2))
     end
 end
 function TDigest(clusters, buffer, δ, k, kinv)
@@ -88,8 +93,9 @@ function TDigest(clusters, buffer, δ, k, kinv)
     end
     td = TDigest(δ, k, kinv, length(clusters)+length(buffersize))
     td.clusters .= clusters
-    td.buffer    .= buffer
+    td.buffer   .= buffer
     td._limits  .= [1, nc, nc+length(buffer)]
+    td._extrema .= [extrema(centroid.(clusters))...]
 end
 # Other constructors tbd
 
@@ -146,7 +152,15 @@ function mergedata!(td::TDigest, newdata)
         # until the buffer is full or there is nothing else to iterate (`finished==true`)
         state, finished = insertbuffer!(td, n+1, newdata, state)
         # sort and merge, and repeat if not finished, with reversed merging direction
-        sort!(buffer(td))
+        b = buffer(td)
+        sort!(b)
+        if length(td) == 0
+            td._extrema[1] = centroid(b[1])
+            td._extrema[2] = centroid(b[end])
+        else
+            (centroid(b[1]) < td._extrema[1]) && (td._extrema[1] = centroid(b[1]))
+            (centroid(b[end]) > td._extrema[2]) && (td._extrema[2] = centroid(b[end]))
+        end
         if forward
             mergebuffer!(td, Val(MergeForward))
         else
@@ -248,5 +262,67 @@ function mergebuffer!(td::TDigest, mergeorder::Val{MergeReverse})
 end
 
 
+
+function quantile(td::TDigest, φ::Real)
+    (φ ≈ 0.0) && return td._extrema[1]
+    (φ ≈ 1.0) && return td._extrema[2]
+    nc = length(td)
+    cc = clusters(td)
+    ranks = cumsum(count.(cc))
+    φn = φ*ranks[end]
+    k = searchsortedfirst(ranks, φn)
+    if k == 1      # hit first cluster
+        return interpolate_centroid_first(φn, td._extrema[1], cc[1], cc[2])
+    elseif k ≥ nc  # hit last cluster
+        return interpolate_centroid_first(φn, cc[nc-1], cc[nc], td._extrema[2], ranks[end])
+    else
+        return interpolate_centroid(φn, ranks[k], cc[k-1], cc[k], cc[k+1])
+    end
+end
+
+function interpolate_centroid(φn, r, c₋, c, c₊)
+    w₋, w, w₊ = count.((c₋, c, c₊))
+    # estimate ranks in the midpoints of the lower and upper clusters
+    r_lower = (w₋ == 1) ? float(r - w) : float(r - w - w₋/2)
+    r_upper = (w₊ == 1) ? float(r + 1) : float(r + w₊/2)
+    x_lower, x, x_upper = centroid.((c₋, c, c₊))
+    # fix upper or lower values for the interpolation
+    if w == 1              # for singleton middle cluster
+        r_upper = float(r)
+        x_upper = x
+    elseif r - φn > (w/2)  # for target in the lower half
+        r_upper = float(r - w/2)
+        x_upper = x
+    else                   # for target in the upper half
+        r_lower = float(r - w/2)
+        x_lower = x
+    end
+    _interpolate(φn, (r_lower, r_upper), (x_lower, x_upper))
+end
+
+function interpolate_centroid_first(φn, minvalue, c, c₊)
+    (φn ≤ 1) && return minvalue
+    w, w₊ = count.((c, c₊))
+    if w == 1      # singleton first cluster
+        return centroid(c)
+    elseif w == 2  # twin first cluster
+        x_lower = minvalue
+        x_upper = 2centroid(c) - minvalue
+        return _interpolate(φn, (1, 2), (x_lower, x_upper))
+    else
+        # add singleton with minimum value and add 1 to the ranks
+        return interpolate_centroid(φn+1, w+1, Cluster(minvalue), c, c₊)
+    end
+end
+
+function interpolate_centroid_last(φn, c₋, c, maxvalue, n)
+    φn = n - φn + 1
+    interpolate_centroid_first(φn, maxvalue, c, c₋)
+end
+
+function _interpolate(x, extrema_x, extrema_y)
+    t = (x - extrema_x[1])/(extrema_x[2] - extrema_x[1])
+    return extrema_y[1] + (extrema_y[2] - extrema_y[1])*t
+end
 
 end # module
