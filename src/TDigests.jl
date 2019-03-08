@@ -133,18 +133,18 @@ end
 
 
 ## Merging algorithm ##
-const MergeForward = false
-const MergeReverse = true
 
 """
-    mergedata!(td::TDigest, newdata)
-    
-Merge progressively the items of the iterator `newdata` into the t-digest `td`.
+    append!(td::TDigest, newdata)
+
+Append the items of `newdata` to the t-digest `td`, by the progressive merging    
+algorithm.
 """
-function mergedata!(td::TDigest, newdata)
-    state = ()                  # for the initial iteration 
-    finished = isempty(newdata) # ensure that there are data to iterate on
-    forward = true              # start with forward-merging
+function Base.append!(td::TDigest, newdata)
+    state = ()                  # for the initial iteration
+    forward   = true
+    newdigest = isempty(td)
+    finished  = isempty(newdata) # ensure that there are data to iterate on
     while !finished
         n = length(td)
         td.buffer[1:n] .= clusters(td) # fill the buffer with existing clusters
@@ -154,17 +154,18 @@ function mergedata!(td::TDigest, newdata)
         # sort and merge, and repeat if not finished, with reversed merging direction
         b = buffer(td)
         sort!(b)
-        if length(td) == 0
+        if newdigest
             td._extrema[1] = centroid(b[1])
             td._extrema[2] = centroid(b[end])
+            newdigest = false
         else
             (centroid(b[1]) < td._extrema[1]) && (td._extrema[1] = centroid(b[1]))
             (centroid(b[end]) > td._extrema[2]) && (td._extrema[2] = centroid(b[end]))
         end
         if forward
-            mergebuffer!(td, Val(MergeForward))
+            mergeforward!(td)
         else
-            mergebuffer!(td, Val(MergeReverse))
+            mergebackwards!(td)
         end
         forward = !forward
     end
@@ -210,14 +211,14 @@ function _bufferiteration!(td, n, iteration::Nothing, newdata, previous_state)
     return (n-1, previous_state)
 end
     
-_qlimit(td::TDigest, q0, order::Val{MergeForward}) = td.kinv(td.k(q0, td.δ) + 1.0, td.δ)
-_qlimit(td::TDigest, q0, order::Val{MergeReverse}) = td.kinv(td.k(q0, td.δ) - 1.0, td.δ)
+_qlimit_forward(td::TDigest, q0) = td.kinv(td.k(q0, td.δ) + 1.0, td.δ)
+_qlimit_backwards(td::TDigest, q0) = td.kinv(td.k(q0, td.δ) - 1.0, td.δ)
 
-function mergebuffer!(td::TDigest, mergeorder::Val{MergeForward})
+function mergeforward!(td::TDigest)
     bf = buffer(td)
     s = sum(count, bf)
     q0 = 0.0
-    qlimit = _qlimit(td, q0, mergeorder)
+    qlimit = _qlimit_forward(td, q0)
     σ = bf[1]
     n = 1
     for x ∈ view(bf, 2:length(bf))
@@ -228,7 +229,7 @@ function mergebuffer!(td::TDigest, mergeorder::Val{MergeForward})
             td.clusters[n] = σ
             n += 1
             q0 += σ.count/s
-            qlimit = _qlimit(td, q0, mergeorder)
+            qlimit = _qlimit_forward(td, q0)
             σ = x
         end
     end
@@ -237,11 +238,11 @@ function mergebuffer!(td::TDigest, mergeorder::Val{MergeForward})
     return n #length(td)
 end
 
-function mergebuffer!(td::TDigest, mergeorder::Val{MergeReverse})
+function mergebackwards!(td::TDigest)
     bf = buffer(td)
     s = sum(count, bf)
     q0 = 1.0
-    qlimit = _qlimit(td, q0, mergeorder)
+    qlimit = _qlimit_backwards(td, q0)
     σ = bf[end]
     n = td.δ
     for x ∈ view(bf, length(bf)-1:-1:1)
@@ -252,7 +253,7 @@ function mergebuffer!(td::TDigest, mergeorder::Val{MergeReverse})
             td.clusters[n] = σ
             n -= 1
             q0 -= σ.count/s
-            qlimit = _qlimit(td, q0, mergeorder)
+            qlimit = _qlimit_backwards(td, q0)
             σ = x
         end
     end
