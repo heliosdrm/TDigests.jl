@@ -137,23 +137,20 @@ end
 """
     append!(td::TDigest, newdata)
 
-Append the items of `newdata` to the t-digest `td`, by the progressive merging    
-algorithm.
+Append the items of `newdata` to the t-digest `td`,
+using the progressive merging algorithm.
 """
 function Base.append!(td::TDigest, newdata)
-    state = ()                  # for the initial iteration
+    newdata = Iterators.Stateful(newdata)
     forward   = true
     newdigest = isempty(td)
-    finished  = isempty(newdata) # ensure that there are data to iterate on
-    while !finished
+    while length(newdata) > 0
         n = length(td)
         td.buffer[1:n] .= clusters(td) # fill the buffer with existing clusters
-        # update `state` with the last successful iteration
-        # until the buffer is full or there is nothing else to iterate (`finished==true`)
-        state, finished = insertbuffer!(td, n+1, newdata, state)
-        # sort and merge, and repeat if not finished, with reversed merging direction
+        insertbuffer!(td, newdata, n)  # fill with yet unused items of newdata
         b = buffer(td)
         sort!(b)
+        # update minimum and maximum values
         if newdigest
             td._extrema[1] = centroid(b[1])
             td._extrema[2] = centroid(b[end])
@@ -162,10 +159,11 @@ function Base.append!(td::TDigest, newdata)
             (centroid(b[1]) < td._extrema[1]) && (td._extrema[1] = centroid(b[1]))
             (centroid(b[end]) > td._extrema[2]) && (td._extrema[2] = centroid(b[end]))
         end
+        # merge the buffer alternating the direction
         if forward
-            mergeforward!(td)
+            mergebuffer_forward!(td)
         else
-            mergebackwards!(td)
+            mergebuffer_backwards!(td)
         end
         forward = !forward
     end
@@ -174,47 +172,24 @@ function Base.append!(td::TDigest, newdata)
 end
 
 """
-    insertbuffer!(td::TDigest, n, newdata, state) -> state, finished::Bool
+    insertbuffer!(td::TDigest, n, newdata)
     
 Insert into the buffer of `td` as many items from `newdata` as possible, starting
-at the index `n` of the buffer and at the position of the iterator marked by `state`.
-
-The function stops when the buffer is full or when the end of `newdata` is reached.
-It returns the state after the last successful iteration, and a `Bool` indicating if 
-`newdata` is finished before filling the buffer, in order to set up subsequent
-reading operations of `newdata` if necessary.
+after the index `n` of the buffer. The function stops when the buffer is full or
+when the end of `newdata` is reached.
 """
-function insertbuffer!(td::TDigest, n, newdata, state)
-    iteration = iterate(newdata, state...)
-    # Recursive insertion of iterations into the buffer (function barrier)
-    # return the last position inserted, and the state after last successful iteration
-    n, state = _bufferiteration!(td, n, iteration, newdata, state)
-    td._limits[3] = n
-    finished = (n < length(td.buffer))
-    return (state, finished)
+function insertbuffer!(td::TDigest, newdata, n)
+    d = min(length(td.buffer)-n, length(newdata))
+    td.buffer[n+1:n+d] .= Cluster.(Iterators.take(newdata, d))
+    td._limits[3] = n+d
+    return nothing
 end
 
-# methods of _bufferiteration (single insertion of data included in `iteration`)
-
-function _bufferiteration!(td, n, iteration, newdata, _) # for successful iterations
-    value, state = iteration
-    td.buffer[n] = Cluster(value)
-    if n < length(td.buffer) # condition for recursion
-        iteration = iterate(newdata, state)
-        n, state = _bufferiteration!(td, n+1, iteration, newdata, state)
-    end
-    return (n, state)
-end
-
-# for failed iteration (the iteration reached its end)
-function _bufferiteration!(td, n, iteration::Nothing, newdata, previous_state)
-    return (n-1, previous_state)
-end
     
 _qlimit_forward(td::TDigest, q0) = td.kinv(td.k(q0, td.δ) + 1.0, td.δ)
 _qlimit_backwards(td::TDigest, q0) = td.kinv(td.k(q0, td.δ) - 1.0, td.δ)
 
-function mergeforward!(td::TDigest)
+function mergebuffer_forward!(td::TDigest)
     bf = buffer(td)
     s = sum(count, bf)
     q0 = 0.0
@@ -235,10 +210,9 @@ function mergeforward!(td::TDigest)
     end
     td.clusters[n] = σ
     td._limits .= [1, n, 0]
-    return n #length(td)
 end
 
-function mergebackwards!(td::TDigest)
+function mergebuffer_backwards!(td::TDigest)
     bf = buffer(td)
     s = sum(count, bf)
     q0 = 1.0
@@ -259,7 +233,6 @@ function mergebackwards!(td::TDigest)
     end
     td.clusters[n] = σ
     td._limits .= [n, td.δ, 0]
-    return n #length(td)
 end
 
 
