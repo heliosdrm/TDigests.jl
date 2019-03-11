@@ -162,6 +162,7 @@ function Base.append!(td::TDigest, newdata)
         # merge the buffer alternating the direction
         if forward
             mergebuffer_forward!(td)
+
         else
             mergebuffer_backwards!(td)
         end
@@ -196,12 +197,18 @@ function mergebuffer_forward!(td::TDigest)
     qlimit = _qlimit_forward(td, q0)
     σ = bf[1]
     n = 1
-    for x ∈ view(bf, 2:length(bf))
+    for (i,x) ∈ enumerate(view(bf, 2:length(bf)))
         q = q0 + (σ.count + x.count)/s
         if q ≤ qlimit
             σ = σ ∪ x
         else
             td.clusters[n] = σ
+            if n == length(td.clusters) # interrupt and merge backwards
+                td.buffer[1:n] .= td.clusters
+                td.buffer[n+1:n+1+length(bf)-i] .= td.buffer[i:length(bf)]
+                mergebuffer_backwards!(td)
+                return nothing
+            end
             n += 1
             q0 += σ.count/s
             qlimit = _qlimit_forward(td, q0)
@@ -210,6 +217,7 @@ function mergebuffer_forward!(td::TDigest)
     end
     td.clusters[n] = σ
     td._limits .= [1, n, 0]
+    return nothing
 end
 
 function mergebuffer_backwards!(td::TDigest)
@@ -219,12 +227,18 @@ function mergebuffer_backwards!(td::TDigest)
     qlimit = _qlimit_backwards(td, q0)
     σ = bf[end]
     n = td.δ
-    for x ∈ view(bf, length(bf)-1:-1:1)
+    for (i,x) ∈ enumerate(view(bf, length(bf)-1:-1:1))
         q = q0 - (σ.count + x.count)/s
         if q ≥ qlimit
             σ = σ ∪ x
         else
             td.clusters[n] = σ
+            if n == 1 # interrupt and merge backwards
+                td.buffer[1:td.δ] .= td.clusters
+                td.buffer[td.δ+1:td.δ+1+length(bf)-i] .= td.buffer[i:length(bf)]
+                mergebuffer_forward!(td)
+                return nothing
+            end
             n -= 1
             q0 -= σ.count/s
             qlimit = _qlimit_backwards(td, q0)
@@ -233,6 +247,7 @@ function mergebuffer_backwards!(td::TDigest)
     end
     td.clusters[n] = σ
     td._limits .= [n, td.δ, 0]
+    return nothing
 end
 
 

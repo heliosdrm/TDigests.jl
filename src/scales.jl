@@ -7,9 +7,9 @@ National Bureau of Standards, url: http://people.math.sfu.ca/~cbm/aands/)
 """
 function approx_asin(x)
     if x ≥ 0
-        return π/2 - √(1-x)*(1.5707288 - 0.2121144x + 0.0742610(x^2) - 0.0187293(x^3))
+        return π/2 - √abs(1-x)*(1.5707288 - 0.2121144x + 0.0742610(x^2) - 0.0187293(x^3))
     else
-        return -π/2 + √(1+x)*(1.5707288 + 0.2121144x + 0.0742610(x^2) + 0.0187293(x^3))
+        return -π/2 + √abs(1+x)*(1.5707288 + 0.2121144x + 0.0742610(x^2) + 0.0187293(x^3))
     end
 end
 
