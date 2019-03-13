@@ -15,11 +15,13 @@ it. Those parameters can be queried by the functions `centroid` and `count`.
 If only a value `x` is passed to the constructor of `Cluster`, a singleton
 cluster is created, with a centroid equal to `Float64(x)`.
 """
-struct Cluster # tbd: support different AbstractFloat types
-    centroid::Float64
-    count::Int
-end
-Cluster(x::T) where {T<:Real} = Cluster(Float64(x), 1)
+# struct Cluster # tbd: support different AbstractFloat types
+#    centroid::Float64
+#    count::Int
+# end
+# Cluster(x::T) where {T<:Real} = Cluster(Float64(x), 1)
+
+const Cluster = NamedTuple{(:centroid, :count),Tuple{Float64,Int64}}
 
 centroid(c::Cluster)  = c.centroid
 count(c::Cluster) = c.count
@@ -35,7 +37,8 @@ The centroid of the new `Cluster` is the weighted average of `centroid(c1)` and
 """
 function Base.union(c1::Cluster, c2::Cluster)
     count = c1.count + c2.count
-    Cluster((c1.centroid*c1.count + c2.centroid*c2.count)/count, count)
+    # Cluster((c1.centroid*c1.count + c2.centroid*c2.count)/count, count)
+    (centroid=(c1.centroid*c1.count + c2.centroid*c2.count)/count, count=count)
 end
 
 # Overloading `Base` functions for `Cluster`
@@ -43,8 +46,8 @@ for comp in (:isless, :isequal)
     @eval Base.$comp(c1::Cluster, c2::Cluster) = $comp(c1.centroid, c2.centroid)
 end
 
-Base.zero(T::Type{Cluster}) = Cluster(zero(Float64),0)
-
+# Base.zero(T::Type{Cluster}) = Cluster(zero(Float64),0)
+Base.zero(T::Type{Cluster}) = (centroid=0.0, count=0)
 
 
 """
@@ -83,7 +86,7 @@ struct TDigest{F<:Function, FI<:Function}
         new{typeof(k),typeof(kinv)}(zeros(Cluster, δ),
                                     zeros(Cluster, δ+buffersize),
                                     δ, k, kinv,
-                                    [1, 0, 0], zeros(Float64,2))
+                                    [1, 0, 1, 0], zeros(Float64,2))
     end
 end
 function TDigest(clusters, buffer, δ, k, kinv)
@@ -94,7 +97,7 @@ function TDigest(clusters, buffer, δ, k, kinv)
     td = TDigest(δ, k, kinv, length(clusters)+length(buffersize))
     td.clusters .= clusters
     td.buffer   .= buffer
-    td._limits  .= [1, nc, nc+length(buffer)]
+    td._limits  .= [1, nc, 1, nc+length(buffer)]
     td._extrema .= [extrema(centroid.(clusters))...]
 end
 # Other constructors tbd
@@ -111,7 +114,7 @@ clusters(td::TDigest) = view(td.clusters, td._limits[1]:td._limits[2])
     
 Extract a view of the clusters buffered to be merged in `td`.
 """
-buffer(td::TDigest)    = view(td.buffer, 1:td._limits[3])
+buffer(td::TDigest) = view(td.buffer, td._limits[3]:td._limits[4])
 
 # Overloading methods for `AbstractVector`.
 Base.length(td::TDigest) = td._limits[2] - td._limits[1] + 1
@@ -144,20 +147,21 @@ function Base.append!(td::TDigest, newdata)
     newdata = Iterators.Stateful(newdata)
     forward   = true
     newdigest = isempty(td)
+    td._limits[3] = 1
     while length(newdata) > 0
         n = length(td)
         td.buffer[1:n] .= clusters(td) # fill the buffer with existing clusters
         insertbuffer!(td, newdata, n)  # fill with yet unused items of newdata
-        b = buffer(td)
-        sort!(b)
+        bf = buffer(td)
+        sort!(bf)
         # update minimum and maximum values
         if newdigest
-            td._extrema[1] = centroid(b[1])
-            td._extrema[2] = centroid(b[end])
+            td._extrema[1] = centroid(bf[1])
+            td._extrema[2] = centroid(bf[end])
             newdigest = false
         else
-            (centroid(b[1]) < td._extrema[1]) && (td._extrema[1] = centroid(b[1]))
-            (centroid(b[end]) > td._extrema[2]) && (td._extrema[2] = centroid(b[end]))
+            (centroid(bf[1]) < td._extrema[1]) && (td._extrema[1] = centroid(bf[1]))
+            (centroid(bf[end]) > td._extrema[2]) && (td._extrema[2] = centroid(bf[end]))
         end
         # merge the buffer alternating the direction
         if forward
@@ -168,8 +172,8 @@ function Base.append!(td::TDigest, newdata)
         end
         forward = !forward
     end
-    td._limits[3] = 0
-    return nothing
+    td._limits[4] = 0
+    return td
 end
 
 """
@@ -181,8 +185,11 @@ when the end of `newdata` is reached.
 """
 function insertbuffer!(td::TDigest, newdata, n)
     d = min(length(td.buffer)-n, length(newdata))
-    td.buffer[n+1:n+d] .= Cluster.(Iterators.take(newdata, d))
-    td._limits[3] = n+d
+    # td.buffer[n+1:n+d] .= Cluster.(Iterators.take(newdata, d))
+    for i=1:d
+        td.buffer[n+i] = (centroid=Iterators.iterate(newdata, 1)[1], count=1)
+    end
+    td._limits[4] = n+d
     return nothing
 end
 
@@ -204,8 +211,10 @@ function mergebuffer_forward!(td::TDigest)
         else
             td.clusters[n] = σ
             if n == length(td.clusters) # interrupt and merge backwards
-                td.buffer[1:n] .= td.clusters
-                td.buffer[n+1:n+1+length(bf)-i] .= td.buffer[i:length(bf)]
+                # td.buffer[1:n] .= td.clusters
+                # td.buffer[n+1:n+length(bf)-i] .= view(bf, i+1:length(bf))
+                td.buffer[i-n+1:i] .= td.clusters
+                td._limits .= [1, 0, i-n+1, length(bf)]
                 mergebuffer_backwards!(td)
                 return nothing
             end
@@ -216,7 +225,7 @@ function mergebuffer_forward!(td::TDigest)
         end
     end
     td.clusters[n] = σ
-    td._limits .= [1, n, 0]
+    td._limits .= [1, n, 1, 0]
     return nothing
 end
 
@@ -233,9 +242,10 @@ function mergebuffer_backwards!(td::TDigest)
             σ = σ ∪ x
         else
             td.clusters[n] = σ
-            if n == 1 # interrupt and merge backwards
-                td.buffer[1:td.δ] .= td.clusters
-                td.buffer[td.δ+1:td.δ+1+length(bf)-i] .= td.buffer[i:length(bf)]
+            if n == 1 # interrupt and merge forward
+                # td.buffer[1:length(bf)-i] .= view(bf, 1:length(bf)-i)
+                td.buffer[length(bf)-i+1 : length(bf)-i+td.δ] .= td.clusters
+                td._limits .= [1, td.δ, 1, td.δ+length(bf)-i]
                 mergebuffer_forward!(td)
                 return nothing
             end
@@ -246,7 +256,7 @@ function mergebuffer_backwards!(td::TDigest)
         end
     end
     td.clusters[n] = σ
-    td._limits .= [n, td.δ, 0]
+    td._limits .= [n, td.δ, 1, 0]
     return nothing
 end
 
@@ -300,7 +310,8 @@ function interpolate_centroid_first(φn, minvalue, c, c₊)
         return _interpolate(φn, (1, 2), (x_lower, x_upper))
     else
         # add singleton with minimum value and add 1 to the ranks
-        return interpolate_centroid(φn+1, w+1, Cluster(minvalue), c, c₊)
+        # return interpolate_centroid(φn+1, w+1, Cluster(minvalue), c, c₊)
+        return interpolate_centroid(φn+1, w+1, (centroid=minvalue, count=1), c, c₊)
     end
 end
 
