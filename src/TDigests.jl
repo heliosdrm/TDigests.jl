@@ -70,7 +70,7 @@ Cf. the functions [`TDigests.k0`](@ref) and [`TDigests.k1`](@ref).
 [1] Dunning, T. & Ertl, O. "Computing extremely accurate quantiles using t-digests",
 arXiv: 1902.04023v1, 2019.
 """
-struct TDigest{F<:Function, FI<:Function}
+mutable struct TDigest{F<:Function, FI<:Function}
     clusters::Vector{Cluster}
     buffer::Vector{Cluster}
     δ::Int
@@ -78,27 +78,21 @@ struct TDigest{F<:Function, FI<:Function}
     kinv::FI
     # actual clusters: .clusters[_limits[1]:_limits[2]]
     # actual buffer: .buffer[1:_limits[3]]
-    _limits::Vector{Int}
+    _c_first::Int
+    _c_last::Int
+    _b_first::Int
+    _b_last::Int
     # extrema for more accurate estimation of extreme quantiles
-    _extrema::Vector{Float64}
+    _min::Float64
+    _max::Float64
     # Inner constructors sets empty centroid and buffer vectors
     function TDigest(δ::Int, k::Function=k1, kinv::Function=k1_inv, buffersize::Int=10δ)
         new{typeof(k),typeof(kinv)}(zeros(Cluster, δ),
                                     zeros(Cluster, δ+buffersize),
                                     δ, k, kinv,
-                                    [1, 0, 1, 0], zeros(Float64,2))
+                                    1, 0, 1, 0,
+                                    0.0, 0.0)
     end
-end
-function TDigest(clusters, buffer, δ, k, kinv)
-    nc = length(clusters)
-    if nc > δ
-        throw(ArgumentError("`length(clusters)` must be greater or equal than `δ`"))
-    end
-    td = TDigest(δ, k, kinv, length(clusters)+length(buffersize))
-    td.clusters .= clusters
-    td.buffer   .= buffer
-    td._limits  .= [1, nc, 1, nc+length(buffer)]
-    td._extrema .= [extrema(centroid.(clusters))...]
 end
 # Other constructors tbd
 
@@ -107,17 +101,17 @@ end
     
 Extract a view as a sorted vector of the clusters contained in `td`.
 """
-clusters(td::TDigest) = view(td.clusters, td._limits[1]:td._limits[2])
+clusters(td::TDigest) = view(td.clusters, td._c_first:td._c_last)
 
 """
     buffer(td::TDigest)
     
 Extract a view of the clusters buffered to be merged in `td`.
 """
-buffer(td::TDigest) = view(td.buffer, td._limits[3]:td._limits[4])
+buffer(td::TDigest) = view(td.buffer, td._b_first:td._b_last)
 
 # Overloading methods for `AbstractVector`.
-Base.length(td::TDigest) = td._limits[2] - td._limits[1] + 1
+Base.length(td::TDigest) = td._c_last - td._c_first + 1
 for f in (:getindex, :view, :iterate)
     @eval Base.$f(td::TDigest, args...) = $f(clusters(td), args...)
 end
@@ -147,7 +141,7 @@ function Base.append!(td::TDigest, newdata)
     newdata = Iterators.Stateful(newdata)
     forward   = true
     newdigest = isempty(td)
-    td._limits[3] = 1
+    td._b_first = 1
     while length(newdata) > 0
         n = length(td)
         td.buffer[1:n] .= clusters(td) # fill the buffer with existing clusters
@@ -156,12 +150,12 @@ function Base.append!(td::TDigest, newdata)
         sort!(bf)
         # update minimum and maximum values
         if newdigest
-            td._extrema[1] = centroid(bf[1])
-            td._extrema[2] = centroid(bf[end])
+            td._min = centroid(bf[1])
+            td._max = centroid(bf[end])
             newdigest = false
         else
-            (centroid(bf[1]) < td._extrema[1]) && (td._extrema[1] = centroid(bf[1]))
-            (centroid(bf[end]) > td._extrema[2]) && (td._extrema[2] = centroid(bf[end]))
+            (centroid(bf[1]) < td._min) && (td._min = centroid(bf[1]))
+            (centroid(bf[end]) > td._max) && (td._max = centroid(bf[end]))
         end
         # merge the buffer alternating the direction
         if forward
@@ -172,7 +166,7 @@ function Base.append!(td::TDigest, newdata)
         end
         forward = !forward
     end
-    td._limits[4] = 0
+    td._b_last = 0
     return td
 end
 
@@ -189,7 +183,7 @@ function insertbuffer!(td::TDigest, newdata, n)
     for i=1:d
         td.buffer[n+i] = (centroid=Iterators.iterate(newdata, 1)[1], count=1)
     end
-    td._limits[4] = n+d
+    td._b_last = n+d
     return nothing
 end
 
@@ -214,7 +208,8 @@ function mergebuffer_forward!(td::TDigest)
                 # td.buffer[1:n] .= td.clusters
                 # td.buffer[n+1:n+length(bf)-i] .= view(bf, i+1:length(bf))
                 td.buffer[i-n+1:i] .= td.clusters
-                td._limits .= [1, 0, i-n+1, length(bf)]
+                td._b_first = i-n+1
+                td._b_last  = length(bf)
                 mergebuffer_backwards!(td)
                 return nothing
             end
@@ -225,7 +220,10 @@ function mergebuffer_forward!(td::TDigest)
         end
     end
     td.clusters[n] = σ
-    td._limits .= [1, n, 1, 0]
+    td._c_first = 1
+    td._c_last  = n
+    td._b_first = 1
+    td._b_last  = 0
     return nothing
 end
 
@@ -245,7 +243,8 @@ function mergebuffer_backwards!(td::TDigest)
             if n == 1 # interrupt and merge forward
                 # td.buffer[1:length(bf)-i] .= view(bf, 1:length(bf)-i)
                 td.buffer[length(bf)-i+1 : length(bf)-i+td.δ] .= td.clusters
-                td._limits .= [1, td.δ, 1, td.δ+length(bf)-i]
+                td._b_first = 1
+                td._b_last  =td.δ+length(bf)-i
                 mergebuffer_forward!(td)
                 return nothing
             end
@@ -256,24 +255,27 @@ function mergebuffer_backwards!(td::TDigest)
         end
     end
     td.clusters[n] = σ
-    td._limits .= [n, td.δ, 1, 0]
+    td._c_first = n
+    td._c_last  = td.δ
+    td._b_first = 1
+    td._b_last  = 0
     return nothing
 end
 
 
 
 function quantile(td::TDigest, φ::Real)
-    (φ ≈ 0.0) && return td._extrema[1]
-    (φ ≈ 1.0) && return td._extrema[2]
+    (φ ≈ 0.0) && return td._min
+    (φ ≈ 1.0) && return td._max
     nc = length(td)
     cc = clusters(td)
     ranks = cumsum(count.(cc))
     φn = φ*ranks[end]
     k = searchsortedfirst(ranks, φn)
     if k == 1      # hit first cluster
-        return interpolate_centroid_first(φn, td._extrema[1], cc[1], cc[2])
+        return interpolate_centroid_first(φn, td._min, cc[1], cc[2])
     elseif k ≥ nc  # hit last cluster
-        return interpolate_centroid_first(φn, cc[nc-1], cc[nc], td._extrema[2], ranks[end])
+        return interpolate_centroid_last(φn, cc[nc-1], cc[nc], td._max, ranks[end])
     else
         return interpolate_centroid(φn, ranks[k], cc[k-1], cc[k], cc[k+1])
     end
