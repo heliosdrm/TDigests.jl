@@ -6,7 +6,7 @@ include("scales.jl")
 
 """
     Cluster(x [, count::Int=1])
-    
+
 Initialize a `Cluster` of values included in a `TDigest`.
 
 A `Cluster` is characterized by its centroid and the count of values included in
@@ -29,7 +29,7 @@ count(c::Cluster) = c.count
 """
     union(c1::Cluster, c2::Cluster)
     c1 ∪ c2
-    
+
 Construct a union of two `Cluster`s of a `TDigest`.
 
 The centroid of the new `Cluster` is the weighted average of `centroid(c1)` and
@@ -52,7 +52,7 @@ Base.zero(T::Type{Cluster}) = (centroid=0.0, count=0)
 
 """
     TDigest(δ::Int [, k::Function=k1, kinv::Function=k1_inv, buffersize::Int=10δ])
-    
+
 Construct an empty `TDigest` with compression parameter `δ`.
 
 A `TDigest` is a data structure composed by a maximum of `⌈δ⌉` clusters that are
@@ -63,7 +63,7 @@ of space allocated for the buffer is 10 times the compression parameter `δ`.
 
 The merging algorithm uses the scale function `k` and its inverse `kinv` to
 define what values of the buffer have to be merged with previous centroids.
-Cf. the functions [`TDigests.k0`](@ref) and [`TDigests.k1`](@ref). 
+Cf. the functions [`TDigests.k0`](@ref) and [`TDigests.k1`](@ref).
 
 ## References:
 
@@ -85,27 +85,32 @@ mutable struct TDigest{F<:Function, FI<:Function}
     # extrema for more accurate estimation of extreme quantiles
     _min::Float64
     _max::Float64
+    # Store number of digested items
+    _nd::Int
     # Inner constructors sets empty centroid and buffer vectors
     function TDigest(δ::Int, k::Function=k1, kinv::Function=k1_inv, buffersize::Int=10δ)
         new{typeof(k),typeof(kinv)}(zeros(Cluster, δ),
                                     zeros(Cluster, δ+buffersize),
                                     δ, k, kinv,
                                     1, 0, 1, 0,
-                                    0.0, 0.0)
+                                    0.0, 0.0, 0)
     end
 end
 # Other constructors tbd
 
+maximum(td::TDigest) = td._max
+minimum(td::TDigest) = td._min
+
 """
     clusters(td::TDigest)
-    
+
 Extract a view as a sorted vector of the clusters contained in `td`.
 """
 clusters(td::TDigest) = view(td.clusters, td._c_first:td._c_last)
 
 """
     buffer(td::TDigest)
-    
+
 Extract a view of the clusters buffered to be merged in `td`.
 """
 buffer(td::TDigest) = view(td.buffer, td._b_first:td._b_last)
@@ -132,20 +137,32 @@ end
 ## Merging algorithm ##
 
 """
-    append!(td::TDigest, newdata)
+    append!(td::TDigest, newdata[, targetsize, comparison])
 
 Append the items of `newdata` to the t-digest `td`,
 using the progressive merging algorithm.
+
+Exclude those values of `newdata` that are lower or greater than `targetsize`,
+using the `comparison` function.
 """
-function Base.append!(td::TDigest, newdata)
+function Base.append!(td::TDigest, newdata,
+    targetsize=length(newdata), comparison=<)
+
     newdata = Iterators.Stateful(newdata)
     forward   = true
     newdigest = isempty(td)
+    # pass full batches of newdata while the number of items in td are less than the target
+    fullbatch = (td._nd < targetsize)
     td._b_first = 1
     while length(newdata) > 0
         n = length(td)
         td.buffer[1:n] .= clusters(td) # fill the buffer with existing clusters
-        insertbuffer!(td, newdata, n)  # fill with yet unused items of newdata
+        if fullbatch
+            newitems = insertbuffer!(td, newdata, n)
+            fullbatch = (td._nd < targetsize) # check again condition for full batch
+        else
+            newitems = insertbuffer!(td, newdata, n, targetsize, comparison)
+        end
         bf = buffer(td)
         sort!(bf)
         # update minimum and maximum values
@@ -157,6 +174,7 @@ function Base.append!(td::TDigest, newdata)
             (centroid(bf[1]) < td._min) && (td._min = centroid(bf[1]))
             (centroid(bf[end]) > td._max) && (td._max = centroid(bf[end]))
         end
+        td._nd += newitems
         # merge the buffer alternating the direction
         if forward
             mergebuffer_forward!(td)
@@ -171,11 +189,15 @@ function Base.append!(td::TDigest, newdata)
 end
 
 """
-    insertbuffer!(td::TDigest, n, newdata)
-    
+    insertbuffer!(td::TDigest, n, newdata[, targetsize, comparison])
+
 Insert into the buffer of `td` as many items from `newdata` as possible, starting
 after the index `n` of the buffer. The function stops when the buffer is full or
 when the end of `newdata` is reached.
+
+Return the number of items added to the buffer
+
+Note: use optionally `targetsize` and `comparison` as in `append!`.
 """
 function insertbuffer!(td::TDigest, newdata, n)
     d = min(length(td.buffer)-n, length(newdata))
@@ -184,10 +206,53 @@ function insertbuffer!(td::TDigest, newdata, n)
         td.buffer[n+i] = (centroid=Iterators.iterate(newdata, 1)[1], count=1)
     end
     td._b_last = n+d
-    return nothing
+    return d
 end
 
-    
+function insertbuffer!(td::TDigest, newdata, n, targetsize, comparison)
+    d = min(length(td.buffer)-n, length(newdata))
+    # pass = _compare(limit) # function to pass data
+    # threshold = limit(td)  # value to pass data
+    threshold = computethreshold(td, targetsize, comparison)
+    n0 = n
+    for i=1:d
+        x = Iterators.iterate(newdata, 1)[1]
+        if comparison(x, threshold)
+            n += 1
+            td.buffer[n] = (centroid=x, count=1)
+        end
+    end
+    td._b_last = n
+    return n-n0
+end
+
+function computethreshold(td::TDigest, targetsize, comparison::typeof(<))
+    ranks = cumsum(count.(clusters(td)))
+    targetcluster = searchsortedfirst(ranks, targetsize)
+    if targetcluster == length(td)
+        threshold = td._max
+    else
+        threshold = centroid(clusters(td)[targetcluster+1])
+    end
+    return threshold
+end
+
+function computethreshold(td::TDigest, targetsize, comparison::typeof(>))
+    ranks = cumsum(count.(clusters(td)))
+    targetcluster = searchsortedfirst(ranks, targetsize)
+    if targetcluster == 1
+        threshold = td._min
+    else
+        threshold = centroid(clusters(td)[targetcluster-1])
+    end
+    return threshold
+end
+
+
+_compare(limit::typeof(maximum)) = (<)
+_compare(limit::typeof(minimum)) = (>)
+
+
 _qlimit_forward(td::TDigest, q0) = td.kinv(td.k(q0, td.δ) + 1.0, td.δ)
 _qlimit_backwards(td::TDigest, q0) = td.kinv(td.k(q0, td.δ) - 1.0, td.δ)
 
@@ -325,6 +390,17 @@ end
 function _interpolate(x, extrema_x, extrema_y)
     t = (x - extrema_x[1])/(extrema_x[2] - extrema_x[1])
     return extrema_y[1] + (extrema_y[2] - extrema_y[1])*t
+end
+
+## Reduced quantile
+
+function tdquantile(x, φ::Real, tdsize=100)
+    targetsize = φ*length(x)
+    if φ > 0.5
+        td = append!(TDigest(tdsize), x, targetsize, >)
+    else
+        td = append!(TDigest(tdsize), x, targetsize, <)
+    return quantile(td, targetsize/td._nd)
 end
 
 end # module
