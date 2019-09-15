@@ -1,6 +1,8 @@
-﻿module TDigests
+module TDigests
 
 export Cluster, TDigest, mergedata!, insertdata, mergebuffer
+
+foo(x) = 2x
 
 include("scales.jl")
 
